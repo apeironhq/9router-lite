@@ -1,0 +1,26 @@
+name: Import 9Router source
+on:
+  push:
+    paths:
+      - .github/workflows/import-upstream.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Copy pinned upstream source
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/decolua/9router.git "$RUNNER_TEMP/9router-source"
+          git -C "$RUNNER_TEMP/9router-source" checkout 1855aa44473e88feac9d3f131b9c0c5fc9706b68
+          tar -C "$RUNNER_TEMP/9router-source" --exclude=.git -cf - . | tar -xf -
+          git add -A
+          if ! git diff --cached --quiet; then
+            git -c user.name='9Router import bot' -c user.email='actions@users.noreply.github.com' commit -m 'Import 9Router source at 1855aa4'
+            git push
+          fi
