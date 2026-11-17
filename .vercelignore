@@ -1,0 +1,7 @@
+node_modules
+.next
+.codex-supabase-smoke.mjs
+.env
+.env.*
+tests
+gitbook
