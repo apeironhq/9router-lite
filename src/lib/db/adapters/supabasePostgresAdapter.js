@@ -1,21 +1,23 @@
 import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_threads";
-import { createRequire } from "node:module";
-import path from "node:path";
 import { TABLES } from "../schema.js";
 
 // The existing repositories use a synchronous SQLite adapter, including
 // synchronous transaction callbacks. Keep that contract while the PostgreSQL
 // socket runs on a worker thread. The socket is never opened in the browser.
+// `pg` is resolved inside the worker source: webpack rewrites createRequire()
+// .resolve() in bundled code into a numeric module id, which require() rejects.
 const workerCode = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
-const pg = require(workerData.pgPath);
+const { createRequire } = require("node:module");
+const nodePath = require("node:path");
+const pg = createRequire(nodePath.join(process.cwd(), "package.json"))("pg");
 pg.types.setTypeParser(20, Number);
 pg.types.setTypeParser(1700, Number);
 
 const pool = new pg.Pool({
-  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+  connectionString: workerData.connectionString,
   max: 1,
-  ssl: { rejectUnauthorized: true },
+  ssl: workerData.ssl,
   connectionTimeoutMillis: 15000,
   idleTimeoutMillis: 10000,
 });
@@ -118,12 +120,44 @@ function restoreColumnNames(row) {
   return restored;
 }
 
-export function createSupabasePostgresAdapter() {
-  if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
-    throw new Error("POSTGRES_URL is required for Supabase deployment");
+// SSL is configured only through POSTGRES_SSL / POSTGRES_CA_CERT so the rule is
+// the same for every provider. sslmode-style URL parameters are removed because
+// pg lets them override the `ssl` option silently.
+//   verify (default) — verify the server certificate against public CAs, or
+//                      against POSTGRES_CA_CERT when set (Supabase uses its own CA).
+//   no-verify        — encrypt without verifying the certificate.
+//   disable          — no TLS (local PostgreSQL only).
+const SSL_URL_PARAMS = ["sslmode", "ssl", "sslcert", "sslkey", "sslrootcert", "uselibpqcompat"];
+
+export function resolvePostgresConnection(env = process.env) {
+  const raw = env.POSTGRES_URL || env.DATABASE_URL;
+  if (!raw) throw new Error("POSTGRES_URL or DATABASE_URL is required for PostgreSQL storage");
+  let connectionString = raw;
+  try {
+    const url = new URL(raw);
+    for (const name of SSL_URL_PARAMS) url.searchParams.delete(name);
+    connectionString = url.toString();
+  } catch {
+    throw new Error("POSTGRES_URL is not a valid postgresql:// URL");
   }
-  const pgPath = createRequire(path.join(process.cwd(), "package.json")).resolve("pg");
-  const worker = new Worker(workerCode, { eval: true, execArgv: [], env: process.env, workerData: { pgPath } });
+
+  const mode = String(env.POSTGRES_SSL || "verify").trim().toLowerCase();
+  let ssl;
+  if (mode === "disable") ssl = false;
+  else if (mode === "no-verify") ssl = { rejectUnauthorized: false };
+  else if (mode === "verify") {
+    // Vercel env values cannot hold real newlines when pasted on one line.
+    const ca = env.POSTGRES_CA_CERT ? env.POSTGRES_CA_CERT.replace(/\\n/g, "\n") : undefined;
+    ssl = ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
+  } else {
+    throw new Error(`POSTGRES_SSL must be verify, no-verify or disable (got "${mode}")`);
+  }
+  return { connectionString, ssl };
+}
+
+export function createSupabasePostgresAdapter() {
+  const { connectionString, ssl } = resolvePostgresConnection();
+  const worker = new Worker(workerCode, { eval: true, execArgv: [], env: process.env, workerData: { connectionString, ssl } });
   worker.on("error", (error) => console.error("[DB] PostgreSQL worker failed:", error));
   worker.on("exit", (code) => { if (code !== 0 && !closed) console.error(`[DB] PostgreSQL worker exited: ${code}`); });
   const { port1, port2 } = new MessageChannel();

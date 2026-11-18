@@ -17,9 +17,15 @@ export async function ensureOutboundProxyInitialized() {
   return initialized;
 }
 
-// Defer init so HTTP server accepts connections first
-setImmediate(() => {
-  ensureOutboundProxyInitialized().catch(console.log);
-});
+// Defer init so HTTP server accepts connections first. Skipped while
+// `next build` prerenders pages: every build worker imports the root layout,
+// and with a remote PostgreSQL database each one would open a connection and
+// race to create the schema. Runtime requests still initialize on first use.
+const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build";
+if (!isBuildPhase) {
+  setImmediate(() => {
+    ensureOutboundProxyInitialized().catch(console.log);
+  });
+}
 
 export default ensureOutboundProxyInitialized;
