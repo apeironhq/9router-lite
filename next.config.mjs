@@ -39,8 +39,13 @@ const nextConfig = {
     // pg is also imported statically by the PostgreSQL adapter; listing its
     // full dependency tree here keeps it complete for routes that reach the
     // database worker another way.
+    // wreq-js (OpenCode free tier, Grok TLS client) is loaded with a hidden
+    // dynamic import, so tracing misses it; serverless functions cannot fall
+    // back to the on-demand `npm install`. Ship it with its Linux x64 glibc
+    // binding (the Vercel runtime); other platforms' globs match nothing.
     "*": [
       "./node_modules/undici/**/*",
+      "./node_modules/wreq-js/**/*", "./node_modules/@wreq-js/binding-linux-x64-gnu/**/*",
       "./node_modules/pg/**/*", "./node_modules/pg-protocol/**/*", "./node_modules/pg-pool/**/*",
       "./node_modules/pg-types/**/*", "./node_modules/pg-connection-string/**/*", "./node_modules/pg-int8/**/*",
       "./node_modules/postgres-array/**/*", "./node_modules/postgres-bytea/**/*", "./node_modules/postgres-date/**/*",
