@@ -1,4 +1,9 @@
 import { Worker, MessageChannel, receiveMessageOnPort } from "node:worker_threads";
+// Not used on this thread. The static import makes Next.js output tracing
+// ship `pg` with its whole dependency tree (postgres-array, pgpass, …) in
+// every function that reaches this adapter; the worker below only loads `pg`
+// from source text, which tracing cannot see.
+import "pg";
 import { TABLES } from "../schema.js";
 
 // The existing repositories use a synchronous SQLite adapter, including

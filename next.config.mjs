@@ -36,7 +36,17 @@ const nextConfig = {
   outputFileTracingIncludes: {
     // serverExternalPackages keeps undici external; dynamic import("undici")
     // alone doesn't pull it into the trace, so force-ship the real package.
-    "*": ["./node_modules/undici/**/*", "./node_modules/pg/**/*", "./node_modules/pg-protocol/**/*", "./node_modules/pg-pool/**/*", "./node_modules/pg-types/**/*"]
+    // pg is also imported statically by the PostgreSQL adapter; listing its
+    // full dependency tree here keeps it complete for routes that reach the
+    // database worker another way.
+    "*": [
+      "./node_modules/undici/**/*",
+      "./node_modules/pg/**/*", "./node_modules/pg-protocol/**/*", "./node_modules/pg-pool/**/*",
+      "./node_modules/pg-types/**/*", "./node_modules/pg-connection-string/**/*", "./node_modules/pg-int8/**/*",
+      "./node_modules/postgres-array/**/*", "./node_modules/postgres-bytea/**/*", "./node_modules/postgres-date/**/*",
+      "./node_modules/postgres-interval/**/*", "./node_modules/xtend/**/*", "./node_modules/pgpass/**/*",
+      "./node_modules/split2/**/*"
+    ]
   },
   outputFileTracingExcludes: {
     "*": ["./gitbook/**/*"]
