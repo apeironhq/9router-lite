@@ -10,17 +10,25 @@ const workerCode = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const { createRequire } = require("node:module");
 const nodePath = require("node:path");
-const pg = createRequire(nodePath.join(process.cwd(), "package.json"))("pg");
-pg.types.setTypeParser(20, Number);
-pg.types.setTypeParser(1700, Number);
-
-const pool = new pg.Pool({
-  connectionString: workerData.connectionString,
-  max: 1,
-  ssl: workerData.ssl,
-  connectionTimeoutMillis: 15000,
-  idleTimeoutMillis: 10000,
-});
+// A load failure is reported on every call instead of crashing the worker,
+// which would leave the caller waiting for the full query timeout.
+let pool = null;
+let loadError = null;
+try {
+  const pg = createRequire(nodePath.join(process.cwd(), "package.json"))("pg");
+  pg.types.setTypeParser(20, Number);
+  pg.types.setTypeParser(1700, Number);
+  pool = new pg.Pool({
+    connectionString: workerData.connectionString,
+    max: 1,
+    ssl: workerData.ssl,
+    connectionTimeoutMillis: 15000,
+    idleTimeoutMillis: 10000,
+  });
+  pool.on("error", () => {});
+} catch (error) {
+  loadError = error;
+}
 let transactionClient = null;
 
 function placeholders(sql) {
@@ -68,9 +76,13 @@ function normalizeSql(sql) {
 
 async function handle(message) {
   const { op, sql, params = [] } = message;
+  if (loadError) throw new Error("PostgreSQL driver (pg) failed to load in the database worker: " + loadError.message);
   if (op === "begin") {
     if (transactionClient) throw new Error("Nested PostgreSQL transactions are not supported");
     transactionClient = await pool.connect();
+    // A checked-out client has no pool error listener; a dropped connection
+    // would otherwise raise an unhandled 'error' and kill the worker.
+    transactionClient.on("error", () => {});
     try { await transactionClient.query("BEGIN"); }
     catch (error) { transactionClient.release(); transactionClient = null; throw error; }
     return null;
@@ -158,14 +170,30 @@ export function resolvePostgresConnection(env = process.env) {
 export function createSupabasePostgresAdapter() {
   const { connectionString, ssl } = resolvePostgresConnection();
   const worker = new Worker(workerCode, { eval: true, execArgv: [], env: process.env, workerData: { connectionString, ssl } });
-  worker.on("error", (error) => console.error("[DB] PostgreSQL worker failed:", error));
-  worker.on("exit", (code) => { if (code !== 0 && !closed) console.error(`[DB] PostgreSQL worker exited: ${code}`); });
   const { port1, port2 } = new MessageChannel();
   worker.postMessage({ port: port2 }, [port2]);
   let sequence = 0;
   let closed = false;
+  // Set when the worker dies or a call times out. The driver then drops this
+  // adapter and builds a fresh one, so a warm Vercel instance recovers on the
+  // next request instead of timing out on every query until it is recycled.
+  let broken = null;
+  worker.on("error", (error) => { broken = broken || error; console.error("[DB] PostgreSQL worker failed:", error); });
+  worker.on("exit", (code) => {
+    if (closed) return;
+    broken = broken || new Error(`PostgreSQL worker exited with code ${code}`);
+    console.error(`[DB] PostgreSQL worker exited: ${code}`);
+  });
+
+  function discard(reason) {
+    broken = broken || reason;
+    closed = true;
+    try { port1.close(); } catch {}
+    worker.terminate().catch(() => {});
+  }
 
   function call(op, sql, params) {
+    if (broken) throw new Error(`PostgreSQL adapter unavailable: ${broken.message}`);
     if (closed) throw new Error("PostgreSQL adapter is closed");
     const id = ++sequence;
     const signal = new Int32Array(new SharedArrayBuffer(4));
@@ -184,12 +212,18 @@ export function createSupabasePostgresAdapter() {
       }
       Atomics.wait(signal, 0, 0, Math.min(1000, deadline - Date.now()));
     }
-    throw new Error("PostgreSQL query timed out");
+    // The worker may still answer later or hold an open transaction; replies
+    // would then be matched to the wrong call. Throw the whole adapter away —
+    // terminating the worker closes its connection and any transaction.
+    const error = new Error("PostgreSQL query timed out");
+    discard(error);
+    throw error;
   }
 
   return {
     driver: "supabase-postgres",
     remote: true,
+    get broken() { return Boolean(broken); },
     run: (sql, params = []) => call("run", sql, params),
     get: (sql, params = []) => restoreColumnNames(call("get", sql, params)),
     all: (sql, params = []) => call("all", sql, params).map(restoreColumnNames),
@@ -208,7 +242,7 @@ export function createSupabasePostgresAdapter() {
     },
     checkpoint() {},
     close() {
-      try { call("close"); } finally { closed = true; port1.close(); worker.terminate(); }
+      try { if (!broken) call("close"); } finally { discard(new Error("closed")); }
     },
   };
 }

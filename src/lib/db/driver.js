@@ -102,7 +102,10 @@ async function initAdapter() {
   }
   if (!adapter) throw new Error("[DB] No SQLite driver available (bun/better/node/sql.js all failed)");
 
+  const raw = adapter;
   adapter = withNullByteSafeParams(adapter);
+  // The wrapper copies properties once, so ask the original adapter directly.
+  adapter.isBroken = () => Boolean(raw.broken);
 
   if (!state.logged) {
     console.log(`[DB] Driver: ${adapter.driver}${adapter.remote ? "" : ` | file: ${DATA_FILE}`}`);
@@ -110,13 +113,34 @@ async function initAdapter() {
   }
 
   const { runMigrationOnce } = await import("./migrate.js");
-  await runMigrationOnce(adapter);
+  try {
+    await runMigrationOnce(adapter);
+  } catch (error) {
+    // Release the worker/connection of a remote adapter that never became usable.
+    if (raw.remote) { try { adapter.close(); } catch {} }
+    throw error;
+  }
   return adapter;
 }
 
 export async function getAdapter() {
+  // A remote adapter whose worker died or timed out is replaced, so a warm
+  // serverless instance heals on the next request.
+  if (state.instance?.isBroken?.()) {
+    const old = state.instance;
+    state.instance = null;
+    state.initPromise = null;
+    try { old.close(); } catch {}
+    console.warn("[DB] Replacing broken database adapter");
+  }
   if (state.instance) return state.instance;
-  if (!state.initPromise) state.initPromise = initAdapter().then((a) => { state.instance = a; return a; });
+  if (!state.initPromise) {
+    state.initPromise = initAdapter().then(
+      (a) => { state.instance = a; return a; },
+      // Do not cache a failed start (e.g. the database was waking up).
+      (error) => { state.initPromise = null; throw error; },
+    );
+  }
   return state.initPromise;
 }
 
