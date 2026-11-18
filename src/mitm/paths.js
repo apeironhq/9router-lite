@@ -5,6 +5,9 @@ const os = require("os");
 const APP_NAME = "9router";
 
 function defaultDir() {
+  // Same rule as src/lib/dataDir.js: Vercel Functions can only write to the
+  // temporary directory (the home directory is read-only there).
+  if (process.env.VERCEL) return path.join(os.tmpdir(), APP_NAME);
   if (process.platform === "win32") {
     return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), APP_NAME);
   }
@@ -12,6 +15,7 @@ function defaultDir() {
 }
 
 function getDataDir() {
+  if (process.env.VERCEL) return defaultDir();
   const configured = process.env.DATA_DIR;
   if (!configured) return defaultDir();
   try {

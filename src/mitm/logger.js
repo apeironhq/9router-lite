@@ -12,7 +12,9 @@ const log = (msg) => console.log(`[${time()}] [MITM] ${msg}`);
 const err = (msg) => console.error(`[${time()}] ❌ [MITM] ${msg}`);
 
 const DUMP_DIR = path.join(DATA_DIR, "logs", "mitm");
-if (!fs.existsSync(DUMP_DIR)) fs.mkdirSync(DUMP_DIR, { recursive: true });
+// Best effort: this module is imported by dashboard pages, so a read-only data
+// directory must not make every importer fail to load.
+try { if (!fs.existsSync(DUMP_DIR)) fs.mkdirSync(DUMP_DIR, { recursive: true }); } catch { /* dumps disabled */ }
 
 // Clear all files inside DUMP_DIR (called on MITM server start to avoid unbounded growth)
 function clearDumpDir() {
